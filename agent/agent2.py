@@ -34,6 +34,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("aegis")
 
+# Use a session that ignores proxy settings for localhost/local backend requests.
+REQUEST_SESSION = requests.Session()
+REQUEST_SESSION.trust_env = False
+
 # ── State ─────────────────────────────────────────
 ENDPOINT_ID   = None
 blocked_rules = set()   # IPs we've already added firewall rules for
@@ -75,7 +79,7 @@ def register(retries: int = MAX_RETRY) -> bool:
     }
     for attempt in range(1, retries + 1):
         try:
-            r = requests.post(
+            r = REQUEST_SESSION.post(
                 f"{BACKEND_URL}/api/endpoint/register",
                 json=payload, timeout=10
             )
@@ -212,7 +216,7 @@ def fetch_policy() -> dict:
         return None
 
     try:
-        r = requests.get(
+        r = REQUEST_SESSION.get(
             f"{BACKEND_URL}/api/endpoint/{ENDPOINT_ID}/policy",
             timeout=10
         )
@@ -259,7 +263,7 @@ def send_batch(connections: list) -> dict:
         return {}
 
     try:
-        r = requests.post(
+        r = REQUEST_SESSION.post(
             f"{BACKEND_URL}/api/connections/batch",
             json={"endpoint_id": ENDPOINT_ID, "connections": connections},
             timeout=15
@@ -322,7 +326,7 @@ def main():
         cleanup_rules()
         # Notify server we're going offline
         try:
-            requests.post(
+            REQUEST_SESSION.post(
                 f"{BACKEND_URL}/api/endpoint/{ENDPOINT_ID}/offline",
                 timeout=5
             )

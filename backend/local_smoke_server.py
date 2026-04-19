@@ -150,6 +150,9 @@ main.check_abuse = fake_check_abuse
 main.gemini_analyze = fake_gemini_analyze
 main.ip_cache = {}
 
+# Export app for uvicorn
+app = main.app
+
 
 if __name__ == "__main__":
     port = int(os.getenv("AEGIS_SMOKE_PORT", "8000"))

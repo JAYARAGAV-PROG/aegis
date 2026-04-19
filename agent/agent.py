@@ -34,6 +34,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("aegis")
 
+# Use a session that ignores proxy settings for localhost/local backend requests.
+REQUEST_SESSION = requests.Session()
+REQUEST_SESSION.trust_env = False
+
 # ── State ─────────────────────────────────────────
 ENDPOINT_ID   = None
 blocked_rules = set()   # IPs we've already added firewall rules for
@@ -61,6 +65,36 @@ def is_private(ip: str) -> bool:
     private = ("192.168.", "10.", "172.16.", "127.", "0.0.0.0", "::")
     return any(ip.startswith(p) for p in private)
 
+
+def parse_backend_error(response: requests.Response) -> tuple[str, list[str]]:
+    detail = ""
+    hints: list[str] = []
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        detail = str(payload.get("detail") or payload.get("error") or "").strip()
+        raw_hints = payload.get("hints")
+        if isinstance(raw_hints, list):
+            hints = [str(h).strip() for h in raw_hints if str(h).strip()]
+    elif response.text:
+        detail = response.text.strip()
+
+    if not detail:
+        detail = f"HTTP {response.status_code} {response.reason}"
+
+    return detail, hints
+
+
+def log_backend_http_error(prefix: str, response: requests.Response) -> None:
+    detail, hints = parse_backend_error(response)
+    log.warning(f"{prefix}: HTTP {response.status_code} - {detail}")
+    for hint in hints[:3]:
+        log.warning(f"  hint: {hint}")
+
 # ── Registration ──────────────────────────────────
 
 def register(retries: int = MAX_RETRY) -> bool:
@@ -75,7 +109,7 @@ def register(retries: int = MAX_RETRY) -> bool:
     }
     for attempt in range(1, retries + 1):
         try:
-            r = requests.post(
+            r = REQUEST_SESSION.post(
                 f"{BACKEND_URL}/api/endpoint/register",
                 json=payload, timeout=10
             )
@@ -83,6 +117,15 @@ def register(retries: int = MAX_RETRY) -> bool:
             ENDPOINT_ID = r.json()["endpoint_id"]
             log.info(f"✅  Registered → endpoint_id: {ENDPOINT_ID}")
             return True
+        except requests.HTTPError as e:
+            if e.response is not None:
+                log_backend_http_error(
+                    f"Registration attempt {attempt}/{retries} failed",
+                    e.response,
+                )
+            else:
+                log.warning(f"Registration attempt {attempt}/{retries} failed: {e}")
+            time.sleep(3 * attempt)
         except Exception as e:
             log.warning(f"Registration attempt {attempt}/{retries} failed: {e}")
             time.sleep(3 * attempt)
@@ -212,12 +255,18 @@ def fetch_policy() -> dict:
         return None
 
     try:
-        r = requests.get(
+        r = REQUEST_SESSION.get(
             f"{BACKEND_URL}/api/endpoint/{ENDPOINT_ID}/policy",
             timeout=10
         )
         r.raise_for_status()
         return r.json()
+    except requests.HTTPError as e:
+        if e.response is not None:
+            log_backend_http_error("Policy sync failed", e.response)
+        else:
+            log.error(f"Policy sync failed: {e}")
+        return None
     except requests.ConnectionError:
         log.warning("Policy sync failed: backend unreachable")
         return None
@@ -259,13 +308,19 @@ def send_batch(connections: list) -> dict:
         return {}
 
     try:
-        r = requests.post(
+        r = REQUEST_SESSION.post(
             f"{BACKEND_URL}/api/connections/batch",
             json={"endpoint_id": ENDPOINT_ID, "connections": connections},
             timeout=15
         )
         r.raise_for_status()
         return r.json()
+    except requests.HTTPError as e:
+        if e.response is not None:
+            log_backend_http_error("Send failed", e.response)
+        else:
+            log.error(f"Send failed: {e}")
+        return {}
     except requests.ConnectionError:
         log.warning("Backend unreachable — will retry next cycle")
         return {}
@@ -322,7 +377,7 @@ def main():
         cleanup_rules()
         # Notify server we're going offline
         try:
-            requests.post(
+            REQUEST_SESSION.post(
                 f"{BACKEND_URL}/api/endpoint/{ENDPOINT_ID}/offline",
                 timeout=5
             )
